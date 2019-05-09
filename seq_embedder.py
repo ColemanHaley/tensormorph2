@@ -124,6 +124,7 @@ class SeqEmbedder():
     # mark up output with deletion and (un)pivot indicators
     def idvec2string(self, x, copy=None, pivot=None):
         id2sym = self.id2sym
+        #print(id2sym)
         segs = [id2sym[id] for id in x]
         y = ' '.join(segs)
         y = re.sub(u'⋉.*', u'⋉', y)

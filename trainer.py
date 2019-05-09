@@ -8,6 +8,7 @@ from decoder import Decoder, LocalistDecoder
 from affixer import Affixer
 from entropy import binary_entropy
 from sklearn.model_selection import train_test_split
+from collections import defaultdict
 import csv
 
 # count number of trainable parameters
@@ -19,7 +20,6 @@ def count_parameters(model):
 def make_split(dat, test_size=0.25):
     train, test = train_test_split(dat, test_size=test_size)
     return train, test
-
 
 # batch of training examples
 def make_batch(dat, nbatch=20, debug=0, start_index=None):
@@ -75,7 +75,7 @@ def get_accuracy(dat, affixer, decoder, exact_only=True):
         make_batch(dat, nbatch=len(dat), start_index=0)
     tpr.recorder = Recorder()
     output, _, _ = affixer(Stems, Morphs, max_len=tpr.nrole)
-    pretty_print(affixer, Targs)
+    #pretty_print(affixer, Targs)
     output = decoder.decode(output)
     dat['pred'] = [tpr.seq_embedder.idvec2string(x) for x in output]
     tpr.recorder.dump(save=1, test=dat)
@@ -148,7 +148,7 @@ def pretty_print(affixer, targs, header='**root**'):
         output_prob = tpr.decoder(record['root-output_tpr'])
         output_prob = torch.exp(log_softmax(output_prob, 1))
         print(np.round(output_prob.data[0,:,1].numpy(), 3))
-    
+
     print(np.round(record['root-affix_tpr'].data[0,0,:].numpy(), 2))
     #print('morph_indx:', np.round(morph_indx.data.numpy(), 2))
     #if affixer.redup:
@@ -163,21 +163,30 @@ class Trainer():
         redup, lr, dc, verbosity
         self.affixer = Affixer(); self.affixer.init()
         #self.affixer = EnsembleAffixer(redup, True, 2); self.affixer.init()
+        self.affixer2 = Affixer(); self.affixer.init()
         self.decoder = Decoder() if 0 else LocalistDecoder()
+        self.decoder2 = Decoder() if 0 else LocalistDecoder()
         tpr.decoder = self.decoder
+        tpr.decoder2 = self.decoder2
 
         print('number of trainable parameters =', count_parameters(self.affixer), '+', count_parameters(self.decoder))
 
         optimizer = optim.Adagrad # optim.RMSprop
         self.affixer_optim = optimizer(self.affixer.parameters(), lr, dc)
+        self.affixer2_optim = optimizer(self.affixer2.parameters(), lr, dc)
         self.decoder_optim = optimizer(self.decoder.parameters(), lr, dc)
+        self.decoder2_optim = optimizer(self.decoder2.parameters(), lr, dc)
         self.criterion = nn.CrossEntropyLoss(ignore_index=0, reduction='none')\
+                        if tpr.loss_func=='loglik' else nn.MSELoss(reduction='none')
+        self.criterion2 = nn.CrossEntropyLoss(ignore_index=0, reduction='none')\
                         if tpr.loss_func=='loglik' else nn.MSELoss(reduction='none')
         #self.regularizer = nn.MSELoss()
         self.regularizer = nn.L1Loss(size_average=False)
+        self.regularizer2 = nn.L1Loss(size_average=False)
 
     def train_and_test(self, train, test, nbatch, max_epochs):
         affixer, decoder = self.affixer, self.decoder
+        affixer2, decoder2 = self.affixer2, self.decoder2
 
         print('training ...',)
         nepoch = 0
@@ -207,7 +216,7 @@ class Trainer():
                 textwriter.writerow(row)
             except:
                 print('error in writing', error)
-        
+
         print('nepochs:', nepoch, 'train_acc:', train_acc, '('+str(train_acc_change) +')', 'test_acc:', test_acc, '('+ str(test_acc_change)+')')
         return affixer, decoder
 
@@ -215,12 +224,47 @@ class Trainer():
     def train_and_test1(self, train, test, nbatch, epoch=0, gradient_update=True):
         affixer, decoder, affixer_optim, decoder_optim, criterion, regularizer =\
         self.affixer, self.decoder, self.affixer_optim, self.decoder_optim, self.criterion, self.regularizer
+        affixer2, decoder2, affixer2_optim, decoder2_optim, criterion2, regulaizer2 =\
+        self.affixer2, self.decoder2, self.affixer2_optim, self.decoder2_optim, self.criterion2, self.regularizer2
 
         # sample min-batch and predict outputs
+        if epoch == 0:
+            filter = {x: 1 for x in train['stem']}
+            global filter2
+            filter2 = {x: 1 for x in train['stem']}
+
+
         stems, morphs, targs, Stems, Morphs, Targs, targ_len = make_batch(train, nbatch)
         max_len = 20 # max(targ_len)
+        # Stems2 = Stems
+        # Morphs2 = Morphs
+        # Targs2 = Targs
+        # print(stems)
+        # if epoch % 50 == 0:
+        #     print('qqqqq')
+        #     print(filter2)
+        filterbatch = torch.unsqueeze(torch.FloatTensor([0 if x[2:-2] in filter2 and filter2[x[2:-2]]==1 else 1 for x in stems]), 1)
+        # print(filterbatch.size())
+        # print(filterbatch)
+
+        #Stems2 = torch.stack([x if filter2[stems[i]]==1 else torch.zeros([31,30]) for i, x in enumerate(Stems)])
+        #Morphs2 = torch.stack([x if filter2[stems[i]]==1 else torch.zeros([1]) for i, x in enumerate(Morphs)])
+        #Targs2 = torch.stack([x if filter2[stems[i]]==1 else torch.zeros([30]) for i, x in enumerate(Targs)]).long()
+        tpr.recorder = Recorder()
         output, affix, (pivot, copy_stem, unpivot, copy_affix) =\
             self.affixer(Stems, Morphs, max_len=max_len)
+        tpr.recorder = Recorder()
+        output2, affix2, (pivot2, copy_stem2, unpivot2, copy_affix2) =\
+            self.affixer2(Stems, Morphs, max_len=max_len)
+        train_acc, avg_change, errors = get_accuracy(train, affixer2, decoder2)
+        error_lemmas = [x[0][2:-2] for x in errors]
+        #print(error_lemmas)
+        if epoch >= 50:
+            if epoch % 50 == 0:
+                print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+                print(len(error_lemmas))
+                print(len(filter2))
+        filter2 = {x: 1 if x in error_lemmas else 0 for x in train['stem']}
         #print(Targs.data.numpy())
 
         # xxx testing
@@ -233,10 +277,15 @@ class Trainer():
         # reset gradients -- this is very important
         self.affixer.zero_grad()
         self.decoder.zero_grad()
+        self.affixer2.zero_grad()
+        self.decoder2.zero_grad()
 
         # get total log-likelihood loss and value for each batch member
         loss, losses =  self.loglik_loss(output, Targs, max_len) if tpr.loss_func=='loglik'\
                         else self.euclid_loss(output, targs, max_len)
+        loss2, losses2 =  self.loglik_loss(output2, Targs, max_len, filterbatch) if tpr.loss_func=='loglik'\
+                        else self.euclid_loss(output2, Targs, max_len)
+
 
         # regularize affix toward epsilon, disprefer pivoting,
         # prefer stem copying
@@ -244,6 +293,9 @@ class Trainer():
         loss += lambda_reg * regularizer(affix, torch.zeros_like(affix))
         loss += lambda_reg * regularizer(pivot, torch.zeros_like(pivot))
         loss += lambda_reg * regularizer(copy_stem, torch.ones_like(copy_stem))
+        loss2 += lambda_reg * regularizer(affix2, torch.zeros_like(affix2))
+        loss2 += lambda_reg * regularizer(pivot2, torch.zeros_like(pivot2))
+        loss2 += lambda_reg * regularizer(copy_stem2, torch.ones_like(copy_stem2))
         #loss  += lambda_reg * regularizer(output, torch.zeros_like(output))
 
         # regularize pivot, copy, unpivot toward extremes (min-entropy)
@@ -254,17 +306,22 @@ class Trainer():
         train_acc = 0.0
         if (epoch % 50 == 0) and self.verbosity>0:
             print()
+            ##(filter2)
+            #print(len(filter2))
+            #print(len(error_lemmas))
+            avg_loss = loss2.item() / float(nbatch)
+            train_acc, errors, _ = get_accuracy(train, affixer, decoder)
+            #train_acc, errors = None, None
             tpr.recorder = Recorder()
-            avg_loss = loss.item() / float(nbatch)
-            #train_acc, errors = get_accuracy(train, affixer, decoder)
-            train_acc, errors = None, None
             output, _, _ = affixer(Stems[0,:,:].unsqueeze(0), Morphs[0,:].unsqueeze(0), tpr.nrole)
             print(epoch,  'avg loss =', avg_loss, 'train_acc =', train_acc)
-            pretty_print(affixer, Targs)
+            pretty_print(affixer2, Targs)
             if True:
                 print('tau_morph =', np.round(affixer.combiner.morph_attender.tau.data[0], 4))
                 print('tau_posn =',  np.round(affixer.combiner.posn_attender.tau.data[0], 4))
                 print('tau_decode =', np.round(decoder.tau.data[0], 4))
+                #print(affixer.affix_attn_data.data[0])
+                #print(tpr.seq_embedder.idvec2string(affixer.affixes[0][0][0][0].unsqueeze(0)))
                 #print('pivoter W0 =', affixer.pivoter.W0.weight.data.numpy())
                 #print('pivoter bias0 =', affixer.pivoter.W0.bias.data.numpy())
                 #print('pivoter W1 =', affixer.pivoter.W1.weight.data.numpy())
@@ -277,6 +334,9 @@ class Trainer():
             loss.backward()
             affixer_optim.step()
             decoder_optim.step()
+            loss2.backward()
+            affixer2_optim.step()
+            decoder2_optim.step()
 
         # manually raise minimum rbf and decoding precision
         # after half of the epochs have been completed
@@ -285,10 +345,13 @@ class Trainer():
         return loss / float(nbatch), train_acc
 
 
-    def loglik_loss(self, output, Targs, max_len):
+    def loglik_loss(self, output, Targs, max_len, weights=None):
         # get loss vector for each batch member
         sim    = self.decoder(output)
         losses = self.criterion(sim, Targs)
+        # print(losses.size())
+        if weights is not None:
+            losses = weights * losses
 
         # sum losses over positions within output,
         # average over batch members
